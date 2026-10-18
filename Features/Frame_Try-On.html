@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Virtual Frame Try-On | Fralen</title>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/"}}</script>
+<style>
+:root{--navy:#0f1f3d;--amber:#f5a623;--line:#e1e5ee}
+*{box-sizing:border-box}body{margin:0;background:#f6f7fa;font:15px/1.4 system-ui,sans-serif;color:#1d2433}
+header{background:var(--navy);color:#fff;padding:.7rem 1rem;border-bottom:3px solid var(--amber)}
+header b{color:var(--amber)}header small{display:block;color:#c3cde0;font-size:.75rem}
+main{max-width:520px;margin:auto;padding:.8rem}
+.stage{position:relative;background:#222;border-radius:10px;overflow:hidden;min-height:260px}
+canvas{display:block;width:100%;height:auto}
+#hint{position:absolute;left:0;right:0;bottom:0;padding:.5rem;background:rgba(0,0,0,.55);color:#fff;font-size:.8rem;text-align:center}
+.consent{font-size:.75rem;margin:.6rem 0;color:#44506a}#go{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);padding:1rem 1.4rem;font-size:1.05rem;border-radius:12px;max-width:85%}#go small{display:block;font-weight:400;font-size:.7rem;margin-top:.3rem;opacity:.85}
+.row{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;margin:.5rem 0}
+button{padding:.55rem .8rem;border-radius:6px;border:2px solid var(--navy);background:#fff;color:var(--navy);font:600 .85rem system-ui;cursor:pointer}
+button.p,button.on{background:var(--navy);color:#fff}button:disabled{opacity:.4}
+label.s{font-size:.78rem;color:#5b6578;display:flex;align-items:center;gap:.4rem;flex:1;min-width:150px}label.s input{flex:1}
+.dot{width:30px;height:30px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 1px #aab;padding:0}.dot.on{box-shadow:0 0 0 3px var(--navy)}
+#strip{display:flex;gap:.5rem;overflow-x:auto;padding:.3rem 0 .6rem}
+.fr{flex:0 0 112px;background:#fff;border:2px solid var(--line);border-radius:8px;padding:.3rem;text-align:center;position:relative;cursor:pointer}
+.fr.on{border-color:var(--navy)}.fr img{width:100%;height:48px;object-fit:contain;background:#f1f3f7;border-radius:5px}
+.fr span{display:block;font-size:.7rem;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.fr i{position:absolute;top:2px;right:6px;font-style:normal;font-size:1.1rem;color:#c33}
+#msg{font-size:.8rem;color:#5b6578;min-height:1.2em}
+</style></head><body>
+<header><b>👓 Virtual Try-On</b><small>Your camera image stays on this device. Nothing is uploaded.</small></header>
+<main>
+<div class="stage" id="stage"><canvas id="cv" width="720" height="960"></canvas><div id="hint"></div><button class="p" id="go">📷 Tap to try frames on<small>Camera stays on your device. Nothing is uploaded.</small></button></div>
+<p class="consent">By tapping start or uploading a photo you agree that your image is processed only on this device. It is not uploaded or stored.</p>
+<div class="row"><button class="p" id="cam">Start camera</button><button id="up">Upload photo</button><button id="stop" hidden>Stop camera</button><input type="file" id="file" accept="image/*" hidden></div>
+<details><summary style="font-size:.8rem;color:#5b6578;cursor:pointer">Fine-tune fit (optional, fit is automatic)</summary><div class="row"><label class="s">Size <input type="range" id="sz" min="0.8" max="1.25" step="0.01" value="1"></label><label class="s">Up / down <input type="range" id="oy" min="-0.3" max="0.3" step="0.01" value="0"></label></div></details>
+<div class="row" id="cols"></div>
+<div class="row"><button id="cmp">Compare</button><button id="favOnly">♥ Favourites</button><button id="snap">Save photo</button><button id="wa">Send shortlist</button></div>
+<div id="strip"></div>
+<div class="row"><button id="addf">+ Add frame photos</button><input type="file" id="ffile" accept="image/png,image/webp" multiple hidden><button id="addg">+ Add 3D frame (GLB)</button><input type="file" id="gfile" accept=".glb,.gltf" multiple hidden><span style="font-size:.72rem;color:#5b6578">PNG: use front-view frame photos with a transparent background (PNG).</span></div>
+<div id="msg"></div>
+</main>
+<script type="module">
+const $=i=>document.getElementById(i),cv=$("cv"),ctx=cv.getContext("2d"),vid=document.createElement("video");
+vid.playsInline=true;vid.muted=true;
+const CDN="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/";
+const MODEL="https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const q=new URLSearchParams(location.search),SHOP=q.get("shop")||"the shop",SPHONE=(q.get("p")||"").replace(/\D/g,"");
+const TINTS=[["Original",""],["Black","#2b2b2b"],["Brown","#8a5a2b"],["Navy","#1f3a6e"],["Wine","#7a1f33"],["Gold","#d4af37"]];
+let lm=null,stream=null,mode=null,photo=null,pose=null,prev=null,raf=0,lastT=-1,frames=[],cur=0,tint="",cmpOn=false,cmpA=0,cmpB=1,slot=0,favOnly=false,cache={};
+let favs=new Set();try{favs=new Set(JSON.parse(localStorage.getItem("fralen_tryon_fav")||"[]"))}catch(e){}
+const msg=t=>$("msg").textContent=t,hint=t=>{$("hint").textContent=t;$("hint").style.display=t?"block":"none"};
+
+// ---------- frames ----------
+function addFrame(name,src){return new Promise(ok=>{const i=new Image();i.onload=()=>{const m=800,r=Math.min(1,m/i.width);let im=i;
+ if(r<1){const c=document.createElement("canvas");c.width=i.width*r;c.height=i.height*r;c.getContext("2d").drawImage(i,0,0,c.width,c.height);im=c}
+ frames.push({id:name,name,img:im,thumb:src,col:sampleCol(im)});ok()};i.onerror=()=>{msg("Could not read "+name);ok()};i.src=src})}
+function sampleCol(img){try{const c=document.createElement("canvas");c.width=64;c.height=Math.max(1,Math.round(64*img.height/img.width));const x=c.getContext("2d");x.drawImage(img,0,0,c.width,c.height);const d=x.getImageData(0,0,c.width,c.height).data;let r=0,g=0,b=0,n=0;
+ for(let y=0;y<c.height;y++)for(let X=0;X<c.width;X++){if(X>6&&X<c.width-6)continue;const i=(y*c.width+X)*4;if(d[i+3]>200){r+=d[i];g+=d[i+1];b+=d[i+2];n++}}return n?[r/n|0,g/n|0,b/n|0].join(","):"40,28,20"}catch(e){return"40,28,20"}}
+function sample(){const c=document.createElement("canvas");c.width=640;c.height=260;const x=c.getContext("2d");
+ const lens=(l)=>{x.beginPath();x.roundRect(l,40,260,170,70);};
+ [30,350].forEach(l=>{lens(l);const g=x.createLinearGradient(l,40,l+260,210);g.addColorStop(0,"rgba(180,200,220,.28)");g.addColorStop(1,"rgba(90,110,130,.14)");x.fillStyle=g;x.fill();
+  const f=x.createLinearGradient(l,40,l,210);f.addColorStop(0,"#5a3416");f.addColorStop(.5,"#2c1709");f.addColorStop(1,"#6b4220");x.lineWidth=18;x.strokeStyle=f;x.stroke();
+  x.lineWidth=3;x.strokeStyle="rgba(255,255,255,.55)";x.beginPath();x.moveTo(l+40,64);x.quadraticCurveTo(l+120,50,l+190,60);x.stroke()});
+ x.lineWidth=14;x.strokeStyle="#3a200d";x.beginPath();x.moveTo(290,90);x.quadraticCurveTo(320,60,350,90);x.stroke();
+ return c.toDataURL()}
+$("addf").onclick=()=>$("ffile").click();
+$("ffile").onchange=async function(){for(const f of this.files){if(!/^image\/(png|webp)$/.test(f.type)){msg("Use PNG/WebP with transparent background.");continue}
+ if(f.size>5*1048576){msg(f.name+" is larger than 5 MB.");continue}await addFrame(f.name.replace(/\.\w+$/,""),URL.createObjectURL(f))}cur=frames.length-1;strip();redraw()};
+function strip(){const h=$("strip");h.innerHTML="";frames.forEach((f,i)=>{if(favOnly&&!favs.has(f.id))return;const d=document.createElement("div");
+ d.className="fr"+((cmpOn?(i===cmpA||i===cmpB):i===cur)?" on":"");d.innerHTML='<img src="'+f.thumb+'" alt=""><span></span><i>'+(favs.has(f.id)?"♥":"♡")+"</i>";d.querySelector("span").textContent=f.name;
+ d.querySelector("i").onclick=e=>{e.stopPropagation();favs.has(f.id)?favs.delete(f.id):favs.add(f.id);try{localStorage.setItem("fralen_tryon_fav",JSON.stringify([...favs]))}catch(_){}strip()};
+ d.onclick=()=>{if(cmpOn){slot?cmpB=i:cmpA=i;slot^=1}else cur=i;strip();redraw()};h.appendChild(d)})}
+TINTS.forEach(t=>{const b=document.createElement("button");b.className="dot"+(t[1]===tint?" on":"");b.title=t[0];b.style.background=t[1]||"linear-gradient(135deg,#fff,#aab)";
+ b.onclick=()=>{tint=t[1];[...$("cols").children].forEach(c=>c.classList.remove("on"));b.classList.add("on");redraw()};$("cols").appendChild(b)});
+$("cmp").onclick=function(){cmpOn=!cmpOn;this.classList.toggle("on",cmpOn);if(frames.length>1&&cmpA===cmpB)cmpB=(cmpA+1)%frames.length;strip();redraw();msg(cmpOn?"Compare: tap a frame for the left side, then another for the right.":"")};
+$("favOnly").onclick=function(){favOnly=!favOnly;this.classList.toggle("on",favOnly);strip()};
+$("wa").onclick=()=>{const n=frames.filter(f=>favs.has(f.id)).map(f=>f.name);if(!n.length){msg("Tap ♡ on frames to shortlist them first.");return}
+ window.open("https://wa.me/"+SPHONE+"?text="+encodeURIComponent("Hi, I shortlisted these frames at "+SHOP+": "+n.join(", ")),"_blank")};
+$("snap").onclick=()=>{if(!mode){msg("Start the try-on or upload a photo first.");return}try{cv.toBlob(b=>{const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="try-on.jpg";a.click();msg("Saved on this device only.")},"image/jpeg",.92)}catch(e){msg("Could not save.")}};
+
+// ---------- face tracking (on-device) ----------
+async function initLM(){if(lm)return lm;msg("Loading face model (first time only)...");
+ try{const {FaceLandmarker,FilesetResolver}=await import(CDN+"vision_bundle.mjs");const fs=await FilesetResolver.forVisionTasks(CDN+"wasm");
+  const o={baseOptions:{modelAssetPath:MODEL},runningMode:"VIDEO",numFaces:1,outputFacialTransformationMatrixes:true};
+  try{lm=await FaceLandmarker.createFromOptions(fs,{...o,baseOptions:{...o.baseOptions,delegate:"GPU"}})}catch(e){lm=await FaceLandmarker.createFromOptions(fs,o)}msg("");return lm}
+ catch(e){msg("Could not load the face model. Check your internet connection and try again.");return null}}
+const dist3=(p,q)=>Math.hypot(p.x-q.x,p.y-q.y,p.z-q.z),sub=(p,q)=>({x:p.x-q.x,y:p.y-q.y,z:p.z-q.z}),dot=(p,q)=>p.x*q.x+p.y*q.y+p.z*q.z,nrm=v=>{const l=Math.hypot(v.x,v.y,v.z)||1;return{x:v.x/l,y:v.y/l,z:v.z/l}};
+// Full automatic fit: frame is a plane placed from 3D face landmarks (pupils, ears, forehead, chin), so roll, turn and nod all warp it correctly.
+function toPose(r,mir){const L=r&&r.faceLandmarks&&r.faceLandmarks[0];if(!L||L.length<478)return null;const W=cv.width,H=cv.height,P=i=>({x:(mir?1-L[i].x:L[i].x)*W,y:L[i].y*H,z:L[i].z*W});
+ let a=P(468),b=P(473);if(a.x>b.x)[a,b]=[b,a];let e1=P(234),e2=P(454);if(e1.x>e2.x)[e1,e2]=[e2,e1];
+ const pd=dist3(a,b),rv=nrm(sub(b,a));let u=sub(P(152),P(10));const k=dot(u,rv);u=nrm({x:u.x-rv.x*k,y:u.y-rv.y*k,z:u.z-rv.z*k});
+ let n={x:rv.y*u.z-rv.z*u.y,y:rv.z*u.x-rv.x*u.z,z:rv.x*u.y-rv.y*u.x};if(n.z>0)n={x:-n.x,y:-n.y,z:-n.z};
+ const S=(pd/63+dist3(e1,e2)/145)/2;return{a,b,e1,e2,rv,u,n,pd,s:S,hx:Math.max(60,Math.min(72,.5*dist3(e1,e2)/S*.95)),fw:(2.2*pd+.93*dist3(e1,e2))/2,ctr:{x:(a.x+b.x)/2,y:(a.y+b.y)/2,z:(a.z+b.z)/2}}}
+function smooth(p){if(!p){prev=null;return null}if(prev){const m=(o,q)=>({x:o.x+(q.x-o.x)*.55,y:o.y+(q.y-o.y)*.55,z:(o.z||0)+((q.z||0)-(o.z||0))*.55}),v=(o,q)=>nrm(m(o,q));
+ p={a:m(prev.a,p.a),b:m(prev.b,p.b),e1:m(prev.e1,p.e1),e2:m(prev.e2,p.e2),rv:v(prev.rv,p.rv),u:v(prev.u,p.u),n:v(prev.n,p.n),s:prev.s+(p.s-prev.s)*.55,hx:prev.hx+(p.hx-prev.hx)*.55,pd:prev.pd+(p.pd-prev.pd)*.55,fw:prev.fw+(p.fw-prev.fw)*.55,ctr:m(prev.ctr,p.ctr)}}prev=p;return p}
+function fit(w,h){const r=Math.min(1,1080/Math.max(w,h));cv.width=Math.round(w*r);cv.height=Math.round(h*r)}
+function tinted(f){if(!tint)return f.img;const k=f.id+tint;if(cache[k])return cache[k];const c=document.createElement("canvas");c.width=f.img.width;c.height=f.img.height;const x=c.getContext("2d");
+ x.drawImage(f.img,0,0);x.globalCompositeOperation="multiply";x.fillStyle=tint;x.fillRect(0,0,c.width,c.height);x.globalCompositeOperation="destination-in";x.drawImage(f.img,0,0);return cache[k]=c}
+// match the frame brightness to the lighting on the customer's face
+let shade=0,shC=null;
+function measure(src){try{const c=measure.c||(measure.c=document.createElement("canvas"));c.width=c.height=24;const x=c.getContext("2d");x.drawImage(src,0,0,24,24);const d=x.getImageData(6,6,12,12).data;let s=0;for(let i=0;i<d.length;i+=4)s+=.2126*d[i]+.7152*d[i+1]+.0722*d[i+2];shade=Math.max(-.35,Math.min(.2,(s/(d.length/4)-125)/300))}catch(e){}}
+function shaded(im){if(Math.abs(shade)<.03)return im;const k=Math.round(shade*20);if(shC&&shC.k===k&&shC.im===im)return shC.c;const c=document.createElement("canvas");c.width=im.width;c.height=im.height;const x=c.getContext("2d");
+ x.drawImage(im,0,0);x.globalCompositeOperation="source-atop";x.fillStyle=shade<0?"rgba(0,0,0,"+(-shade)+")":"rgba(255,255,255,"+shade*.5+")";x.fillRect(0,0,c.width,c.height);shC={k,im,c};return c}
+function temple(p,col,cx,cy,R,U,fw,side){const hx=cx+R.x*.5*side-U.x*.2,hy=cy+R.y*.5*side-U.y*.2,ear=side<0?p.e1:p.e2,out=(ear.x-hx)*side,al=Math.max(0,Math.min(1,(out-.03*fw)/(.14*fw)));if(al<=0)return;
+ const tx=ear.x,ty=hy+(ear.y-hy)*.3,dx=tx-hx,dy=ty-hy,l=Math.hypot(dx,dy)||1,px=-dy/l,py=dx/l,w0=.032*fw,w1=.02*fw,g=ctx.createLinearGradient(hx,hy,tx,ty);
+ g.addColorStop(0,"rgba("+col+","+.95*al+")");g.addColorStop(.8,"rgba("+col+","+.9*al+")");g.addColorStop(1,"rgba("+col+",0)");
+ ctx.save();ctx.fillStyle=g;ctx.beginPath();ctx.moveTo(hx+px*w0,hy+py*w0);ctx.lineTo(tx+px*w1,ty+py*w1);ctx.lineTo(tx-px*w1,ty-py*w1);ctx.lineTo(hx-px*w0,hy-py*w0);ctx.closePath();ctx.fill();ctx.restore()}
+function drawFrame(f){return(f.kind==="3d"||f.kind==="glb")?draw3D(f):drawFrame2D(f)}
+function drawFrame2D(f){const p=pose,im=shaded(tinted(f)),fw=p.fw*parseFloat($("sz").value),fh=fw*im.height/im.width,R={x:p.rv.x*fw,y:p.rv.y*fw},U={x:p.u.x*fh,y:p.u.y*fh},off=parseFloat($("oy").value)*p.pd,sh=.07*fw,
+ cx=p.ctr.x+p.n.x*sh+p.u.x*off,cy=p.ctr.y+p.n.y*sh+p.u.y*off,col=tint?[parseInt(tint.slice(1,3),16),parseInt(tint.slice(3,5),16),parseInt(tint.slice(5,7),16)].map(v=>v*.7|0).join(","):f.col;
+ temple(p,col,cx,cy,R,U,fw,-1);temple(p,col,cx,cy,R,U,fw,1);
+ ctx.save();ctx.setTransform(R.x/im.width,R.y/im.width,U.x/im.height,U.y/im.height,cx-.5*R.x-.5*U.x,cy-.5*R.y-.5*U.y);
+ ctx.shadowColor="rgba(0,0,0,.3)";ctx.shadowBlur=fw*.025;ctx.shadowOffsetY=fw*.015;ctx.drawImage(im,0,0);ctx.restore()}
+function redraw(){const src=mode==="camera"?vid:photo;if(!src)return;const W=cv.width,H=cv.height,mir=mode==="camera";
+ ctx.save();if(mir){ctx.translate(W,0);ctx.scale(-1,1)}ctx.drawImage(src,0,0,W,H);ctx.restore();
+ if(!pose){hint("Face the camera in good light");return}const ratio=pose.pd/W;hint(ratio<.1?"Come a little closer":ratio>.32?"Move back a little":"");if(!frames.length)return;
+ if(cmpOn&&frames.length>1){[[0,W/2,cmpA],[W/2,W/2,cmpB]].forEach(h=>{ctx.save();ctx.beginPath();ctx.rect(h[0],0,h[1],H);ctx.clip();drawFrame(frames[h[2]]);ctx.restore()});ctx.fillStyle="#fff";ctx.fillRect(W/2-1.5,0,3,H)}else drawFrame(frames[cur])}
+let fc=0;function loop(){if(mode!=="camera")return;if(vid.readyState>=2&&vid.currentTime!==lastT){lastT=vid.currentTime;try{pose=smooth(toPose(lm.detectForVideo(vid,performance.now()),true));if(fc++%15===0)measure(vid)}catch(e){}}redraw();raf=requestAnimationFrame(loop)}
+function needOk(){return true}
+const startCam=$("cam").onclick=$("go").onclick=async()=>{if(!needOk())return;if(!await initLM())return;
+ try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:720},height:{ideal:960}},audio:false});vid.srcObject=stream;await vid.play();
+  fit(vid.videoWidth,vid.videoHeight);mode="camera";prev=null;$("go").hidden=true;$("stop").hidden=false;msg("Swipe left or right on the picture to change frames.");loop()}
+ catch(e){msg("Camera not available. Allow camera access, or upload a photo instead.")}};
+function stopCam(){cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;if(mode==="camera"){mode=null;ctx.clearRect(0,0,cv.width,cv.height);hint("");$("go").hidden=false}$("stop").hidden=true}
+$("stop").onclick=stopCam;addEventListener("pagehide",stopCam);document.addEventListener("visibilitychange",()=>{if(document.hidden)stopCam()});
+$("up").onclick=()=>{if(needOk())$("file").click()};
+$("file").onchange=async function(){const f=this.files[0];this.value="";if(!f)return;if(!/^image\//.test(f.type)||f.size>12*1048576){msg("Use a photo under 12 MB.");return}
+ if(!await initLM())return;stopCam();const i=new Image();i.onload=()=>{URL.revokeObjectURL(i.src);photo=i;fit(i.width,i.height);mode="photo";prev=null;
+  try{lm.setOptions({runningMode:"IMAGE"});pose=toPose(lm.detect(i),false);lm.setOptions({runningMode:"VIDEO"})}catch(e){pose=null}$("go").hidden=true;measure(i);redraw();msg(pose?"Drag the sliders to fine-tune the fit.":"")};i.src=URL.createObjectURL(f)};
+["sz","oy"].forEach(k=>$(k).oninput=redraw);
+
+// ======================= 3D ENGINE (Three.js, loaded on demand) =======================
+// Real 3D frames (acetate / metal, reflections, shadows). The head is approximated by an invisible ellipsoid sized from the customer's face,
+// so the far temple and the ear-end of the near temple disappear behind the head like real glasses.
+let T3=null;
+const SPECS=[
+ {id:"3d-round",name:"Round Tortoise",shape:"round",a:25,b:25,t:4.2,kind:"acetate",color:"#7a3f12",pattern:"tortoise",d:5.5},
+ {id:"3d-way",name:"Wayfarer Black",shape:"way",a:27,b:20,t:5,kind:"acetate",color:"#141414",d:6},
+ {id:"3d-cat",name:"Cat-eye Wine",shape:"cat",a:27,b:19,t:4.2,kind:"acetate",color:"#6a1230",d:5.5},
+ {id:"3d-avi",name:"Aviator Gold",shape:"avi",a:29,b:24,t:1.5,kind:"metal",color:"#d4af37",d:1.6,lens:"#3a4a3a",lensOp:.55},
+ {id:"3d-sq",name:"Square Navy",shape:"square",a:26,b:20,t:4.5,kind:"acetate",color:"#1b2f5c",d:5.5},
+ {id:"3d-clr",name:"Crystal Clear",shape:"round",a:25,b:24,t:3.6,kind:"acetate",color:"#e8eef2",d:5,clear:true}];
+function lensPts(sh,a,b,N){const n={round:2,way:3,cat:2.6,avi:2.3,square:3.4}[sh]||2,P=[];
+ for(let i=0;i<N;i++){const t=i/N*Math.PI*2,c=Math.cos(t),s=Math.sin(t);let x=a*Math.sign(c)*Math.pow(Math.abs(c),2/n),y=b*Math.sign(s)*Math.pow(Math.abs(s),2/n);
+  if(sh==="way"){x*=y>0?1.05:.92;y+=.09*b*(x/a)}if(sh==="cat"){y+=.32*b*Math.pow(Math.max(x,0)/a,1.5);if(y<0)y*=.85}if(sh==="avi"&&y<0)x*=1+.14*(y/b);P.push([x,y])}return P}
+function thumb3D(sp){const c=document.createElement("canvas");c.width=224;c.height=96;const x=c.getContext("2d"),k=1.35,cx=sp.a+sp.t+9;x.strokeStyle=sp.color;x.lineWidth=Math.max(3,sp.t*k*.8);x.lineJoin="round";
+ [1,-1].forEach(sd=>{x.beginPath();lensPts(sp.shape,sp.a,sp.b,48).forEach((p,i)=>{const X=112+sd*(p[0]+cx)*k*.9,Y=48-p[1]*k*.9;i?x.lineTo(X,Y):x.moveTo(X,Y)});x.closePath();x.stroke()});return c.toDataURL()}
+let tort=null;function tortoiseTex(){if(tort)return tort;const c=document.createElement("canvas");c.width=c.height=512;const x=c.getContext("2d");x.fillStyle="#8a4a14";x.fillRect(0,0,512,512);
+ for(let i=0;i<90;i++){const px=Math.random()*512,py=Math.random()*512,r=20+Math.random()*50,g=x.createRadialGradient(px,py,0,px,py,r);g.addColorStop(0,Math.random()<.55?"rgba(30,14,6,.85)":"rgba(214,150,52,.7)");g.addColorStop(1,"rgba(0,0,0,0)");x.fillStyle=g;x.fillRect(px-r,py-r,r*2,r*2)}
+ const t=new T3.THREE.CanvasTexture(c);t.wrapS=t.wrapT=T3.THREE.RepeatWrapping;t.repeat.set(1/80,1/80);t.colorSpace=T3.THREE.SRGBColorSpace;return tort=t}
+function bodyMat(sp,col,front){const TH=T3.THREE;if(sp.kind==="metal")return new TH.MeshPhysicalMaterial({color:col||sp.color,metalness:1,roughness:.22,clearcoat:.25,envMapIntensity:1.3});
+ const m=new TH.MeshPhysicalMaterial({color:col||sp.color,roughness:.28,metalness:0,clearcoat:1,clearcoatRoughness:.06,envMapIntensity:1.1});
+ if(sp.clear){m.transparent=true;m.opacity=.62;m.roughness=.1}if(front&&sp.pattern==="tortoise"&&!col){m.map=tortoiseTex();m.color.set("#ffffff")}return m}
+function buildFrame(sp,col){const TH=T3.THREE,g=new TH.Group(),a=sp.a,b=sp.b,t=sp.t,d=sp.d,cx=a+t+9,pts=lensPts(sp.shape,a,b,72),front=bodyMat(sp,col,true),dark=bodyMat(sp,col,false);
+ if(sp.clear)dark.opacity=.7;
+ const lensM=new TH.MeshPhysicalMaterial({color:sp.lens||"#dfe9f2",transparent:true,opacity:sp.clear?.1:(sp.lensOp||.14),roughness:.03,clearcoat:1,envMapIntensity:1.6,side:TH.DoubleSide,depthWrite:false});
+ [1,-1].forEach(sd=>{let P=pts.map(p=>new TH.Vector2(sd*(p[0]+cx),p[1]));if(sd<0)P=P.reverse();
+  const outer=P.map(v=>new TH.Vector2(sd*cx+(v.x-sd*cx)*(a+t)/a,v.y*(b+t)/b)),sh=new TH.Shape(outer);sh.holes.push(new TH.Path(P));
+  const geo=new TH.ExtrudeGeometry(sh,{depth:d,bevelEnabled:true,bevelThickness:.8,bevelSize:.7,bevelSegments:3,curveSegments:12});geo.translate(0,0,-d/2);
+  const m=new TH.Mesh(geo,front);m.castShadow=true;g.add(m);const lg=new TH.Mesh(new TH.ShapeGeometry(new TH.Shape(P)),lensM);lg.position.z=-.3;lg.renderOrder=1;g.add(lg);
+  const x0=sd*(cx+a+t-.5),yH=b*.42,pp=[[0,0,-d/2],[-1,-.3,-55],[-2.5,-1.5,-105],[-5,-11,-128],[-8,-30,-143]].map(q=>new TH.Vector3(x0+sd*q[0],yH+q[1],q[2]));
+  const tm=new TH.Mesh(new TH.TubeGeometry(new TH.CatmullRomCurve3(pp),48,sp.kind==="metal"?1:2.2,8,false),dark);tm.castShadow=true;g.add(tm)});
+ const xi=cx-a-t,bm=new TH.Mesh(new TH.TubeGeometry(new TH.CatmullRomCurve3([new TH.Vector3(-xi-1,b*.25,0),new TH.Vector3(0,b*.5,1),new TH.Vector3(xi+1,b*.25,0)]),16,sp.kind==="metal"?1:2.4,8,false),dark);bm.castShadow=true;g.add(bm);return g}
+async function load3D(){try{const THREE=await import("three"),{GLTFLoader}=await import("three/addons/loaders/GLTFLoader.js"),{RoomEnvironment}=await import("three/addons/environments/RoomEnvironment.js");
+ const canvas=document.createElement("canvas"),renderer=new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});renderer.setPixelRatio(1);renderer.setClearColor(0x000000,0);renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;renderer.toneMapping=THREE.ACESFilmicToneMapping;
+ const scene=new THREE.Scene();scene.environment=new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(),.04).texture;
+ const light=new THREE.DirectionalLight(0xffffff,1.6);light.castShadow=true;light.shadow.mapSize.set(1024,1024);light.shadow.bias=-.0004;light.shadow.radius=5;scene.add(light,light.target,new THREE.HemisphereLight(0xffffff,0x887766,.5));
+ const holder=new THREE.Group(),occ=new THREE.Mesh(new THREE.SphereGeometry(1,32,24),new THREE.MeshBasicMaterial({colorWrite:false}));occ.renderOrder=-2;
+ const rec=new THREE.Mesh(new THREE.SphereGeometry(1.004,32,24),new THREE.ShadowMaterial({opacity:.25}));rec.receiveShadow=true;holder.add(occ,rec);scene.add(holder);
+ const cam=new THREE.OrthographicCamera(0,1,0,-1,.1,6000);cam.position.z=3000;T3={THREE,GLTFLoader,renderer,canvas,scene,light,holder,occ,rec,cam,cur:null,cache:{},w:0,h:0};
+ const fresh=SPECS.map(sp=>({id:sp.id,name:sp.name,kind:"3d",spec:sp,thumb:thumb3D(sp),col:"40,28,20"}));frames.unshift(...fresh);cur=0;cmpA=0;cmpB=1;strip();redraw();msg("3D frames ready. Add your own GLB models with + Add 3D frame.")}
+ catch(e){T3=null;console.warn("3D engine unavailable",e);msg("3D frames need internet (first load) and WebGL. Photo (PNG) frames still work.")}}
+function draw3D(f){const T=T3;if(!T)return;const TH=T.THREE,W=cv.width,H=cv.height,p=pose;if(T.w!==W||T.h!==H){T.renderer.setSize(W,H,false);T.cam.right=W;T.cam.bottom=-H;T.cam.updateProjectionMatrix();T.w=W;T.h=H}
+ const c3=v=>new TH.Vector3(v.x,-v.y,-v.z),X=c3(p.rv).normalize(),Y=c3(p.u).multiplyScalar(-1).normalize(),Z=new TH.Vector3().crossVectors(X,Y).normalize();Y.crossVectors(Z,X).normalize();
+ const s=p.s*parseFloat($("sz").value),pos=c3(p.ctr).addScaledVector(Z,12*s).addScaledVector(Y,-parseFloat($("oy").value)*p.pd);
+ T.holder.position.copy(pos);T.holder.quaternion.setFromRotationMatrix(new TH.Matrix4().makeBasis(X,Y,Z));T.holder.scale.setScalar(s);
+ T.occ.scale.set(p.hx,108,92);T.occ.position.set(0,-10,-108);T.rec.scale.copy(T.occ.scale);T.rec.position.copy(T.occ.position);
+ let obj=f.kind==="glb"?f.obj:(T.cache[f.id+tint]||(T.cache[f.id+tint]=buildFrame(f.spec,tint||null)));
+ if(T.cur!==obj){if(T.cur)T.holder.remove(T.cur);T.holder.add(obj);T.cur=obj}
+ const L=new TH.Vector3(-.35,.8,.9).normalize();T.light.position.copy(pos).addScaledVector(L,1800);T.light.target.position.copy(pos);T.light.target.updateMatrixWorld();
+ const sc=T.light.shadow.camera;sc.left=-220*s;sc.right=220*s;sc.top=220*s;sc.bottom=-220*s;sc.near=100;sc.far=4000;sc.updateProjectionMatrix();
+ T.renderer.toneMappingExposure=Math.max(.6,Math.min(1.3,1+shade*1.4));T.renderer.render(T.scene,T.cam);ctx.drawImage(T.canvas,0,0)}
+$("addg").onclick=()=>$("gfile").click();
+$("gfile").onchange=async function(){if(!T3){msg("3D engine is not loaded. Check your internet connection.");return}const TH=T3.THREE;
+ for(const f of this.files){if(f.size>25*1048576){msg(f.name+" is larger than 25 MB.");continue}try{const url=URL.createObjectURL(f),gl=await new Promise((ok,no)=>new T3.GLTFLoader().load(url,ok,undefined,no));URL.revokeObjectURL(url);
+  const o=gl.scene,bb=new TH.Box3().setFromObject(o),sz=bb.getSize(new TH.Vector3()),ct=bb.getCenter(new TH.Vector3()),w=new TH.Group();o.position.set(-ct.x,-ct.y,-bb.max.z);o.traverse(n=>{if(n.isMesh)n.castShadow=true});w.add(o);w.scale.setScalar(138/(sz.x||1));w.position.z=2;
+  const c=document.createElement("canvas");c.width=224;c.height=96;const x=c.getContext("2d");x.fillStyle="#445";x.font="bold 40px system-ui";x.textAlign="center";x.fillText("3D",112,62);
+  frames.push({id:f.name,name:f.name.replace(/\.\w+$/,""),kind:"glb",obj:w,thumb:c.toDataURL(),col:"40,28,20"});cur=frames.length-1}catch(e){msg("Could not read "+f.name+" (use a .glb with glasses upright, front facing +Z).")}}this.value="";strip();redraw()};
+(async()=>{await addFrame("Sample (add your own)",sample());strip();load3D()})();
+let sx=null;$("stage").onpointerdown=e=>{sx=e.clientX};$("stage").onpointerup=e=>{if(sx===null||cmpOn||frames.length<2)return;const d=e.clientX-sx;sx=null;if(Math.abs(d)>60){cur=(cur+(d<0?1:-1)+frames.length)%frames.length;strip();redraw()}};
+/*TESTHOOK*/
+</script></body></html>
