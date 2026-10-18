@@ -57,6 +57,8 @@
     font-size: 12px; font-weight: 700; font-family: 'Inter', sans-serif; cursor: pointer;
   }
   .stage-select.stage-Pending { background: #FEF3C7; color: #B45309; border-color: #FDE68A; }
+  .stage-select.stage-Processing { background: #EDE9FE; color: #6D28D9; border-color: #DDD6FE; }
+  .eta-input { padding: 5px 6px; border-radius: 7px; border: 1.5px solid var(--border); font-size: 12px; font-family: 'Inter', sans-serif; color: var(--navy); }
   .stage-select.stage-Ready { background: #DBEAFE; color: #1D4ED8; border-color: #BFDBFE; }
   .stage-select.stage-Delivered { background: #D1FAE5; color: #047857; border-color: #A7F3D0; }
 
@@ -121,10 +123,10 @@
       <thead>
         <tr>
           <th>Order No.</th><th>Customer</th><th>Date</th>
-          <th>Payable</th><th>Advance Paid</th><th>Pending</th><th>Payment Mode</th><th>Payment Status</th><th>Order Stage</th><th>Action</th>
+          <th>Payable</th><th>Advance Paid</th><th>Pending</th><th>Payment Mode</th><th>Payment Status</th><th>Order Stage</th><th>Est. Collection</th><th>Action</th>
         </tr>
       </thead>
-      <tbody id="orders-tbody"><tr><td colspan="10" class="loading">Loading orders...</td></tr></tbody>
+      <tbody id="orders-tbody"><tr><td colspan="11" class="loading">Loading orders...</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -161,12 +163,16 @@
 
 <script type="module">
 import { getDocs, doc, getDoc, updateDoc, arrayUnion } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import { requireAuth, tenantCollection, profileDoc } from "./firebase-config.js";
+import { STAGES, normalizeStage, trackingUrl, trackingMessage, whatsappUrl } from "./js/order-stages.js";
 import { printInvoice } from "./invoice-print.js";
 import { printPrescription } from "./prescription-print.js";
 import { shareReceiptOnWhatsApp } from "./receipt-image.js";
 
 let shopProfile = {};
+// Customer tracking links: signed-in call that returns (or creates) this order's random token.
+const createTrackingLink = httpsCallable(getFunctions(undefined, "asia-south1"), "createOrderTrackingLink");
 
 let currentUid = null;
 let allOrders = [];
@@ -202,7 +208,7 @@ async function loadOrders() {
     updateStats();
     renderTable();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="10" class="loading">Error loading orders: ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" class="loading">Error loading orders: ${err.message}</td></tr>`;
   }
 }
 
@@ -235,7 +241,7 @@ window.renderTable = function () {
   }
 
   if (list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" class="empty-state">${activeTab === 'pending' ? 'No pending payments 🎉' : 'No orders found'}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" class="empty-state">${activeTab === 'pending' ? 'No pending payments 🎉' : 'No orders found'}</td></tr>`;
     return;
   }
 
@@ -266,6 +272,8 @@ window.renderTable = function () {
     let actions = '';
     actions += `<button class="action-btn btn-edit" style="background:var(--accent-soft);color:var(--navy)" onclick="window.printOrder('${o.id}')">🖨️ Print</button>`;
     actions += `<button class="action-btn" style="background:#DCFCE7;color:#059669" onclick="window.sendOrderOnWhatsApp('${o.id}')">📲 WhatsApp</button>`;
+    actions += `<button class="action-btn" style="background:#EEF1FE;color:#4338CA" onclick="window.sendTrackingOnWhatsApp('${o.id}')">📍 Send Tracking</button>`;
+    actions += `<button class="action-btn" style="background:#F1F5F9;color:#334155" onclick="window.copyTrackingLink('${o.id}')">🔗 Copy Link</button>`;
     if (o.hasLens && o.prescription) {
       actions += `<button class="action-btn btn-edit" style="background:#EEF1FE;color:#7B93FF" onclick="window.printRx('${o.id}')">👁️ Rx Card</button>`;
     }
@@ -288,12 +296,11 @@ window.renderTable = function () {
         <td>${modeCell}</td>
         <td>${statusBadge}</td>
         <td>
-          <select class="stage-select stage-${o.orderStage || 'Pending'}" onchange="window.updateOrderStage('${o.id}', this.value)">
-            <option value="Pending" ${(o.orderStage || 'Pending') === 'Pending' ? 'selected' : ''}>⏳ Pending</option>
-            <option value="Ready" ${o.orderStage === 'Ready' ? 'selected' : ''}>📦 Ready</option>
-            <option value="Delivered" ${o.orderStage === 'Delivered' ? 'selected' : ''}>✅ Delivered</option>
+          <select class="stage-select stage-${normalizeStage(o.orderStage)}" onchange="window.updateOrderStage('${o.id}', this.value)">
+            ${STAGES.map(st => `<option value="${st.key}" ${normalizeStage(o.orderStage) === st.key ? 'selected' : ''}>${st.shopLabel}</option>`).join('')}
           </select>
         </td>
+        <td><input type="date" class="eta-input" value="${String(o.deliveryDate || '').slice(0, 10)}" onchange="window.updateEta('${o.id}', this.value)"/></td>
         <td>${actions}</td>
       </tr>`;
   }).join('');
@@ -375,9 +382,14 @@ window.updateOrderStage = async function (orderId, newStage) {
   if (!order) return;
   try {
     const orderRef = doc(tenantCollection(currentUid, "orders"), orderId);
-    await updateDoc(orderRef, { orderStage: newStage });
+    if (!STAGES.some(st => st.key === newStage)) throw new Error('Invalid stage');
+    const now = new Date().toISOString();
+    // The customer tracking page reads this same field, so it updates automatically.
+    await updateDoc(orderRef, { orderStage: newStage, ['stageTimes.' + newStage]: now });
     order.orderStage = newStage;
-    showToast(`✅ Order stage updated to "${newStage}"`);
+    order.stageTimes = Object.assign({}, order.stageTimes, { [newStage]: now });
+    showToast(`✅ Order stage updated to "${STAGES.find(st => st.key === newStage).label}"`);
+    renderTable(); // refresh the dropdown colour
   } catch (e) {
     alert('Update fail hua: ' + e.message);
     renderTable(); // revert dropdown to actual stored value
@@ -421,6 +433,65 @@ window.confirmOrder = async function (orderId) {
     renderTable();
   } catch (e) {
     alert('Confirm fail hua: ' + e.message);
+  }
+};
+
+// ---------- ESTIMATED COLLECTION DATE ----------
+// Stored in the existing `deliveryDate` field (create-order.html "Delivery Date"). The time part of
+// an older value is kept so the invoice / customer history still show the same time.
+window.updateEta = async function (orderId, dateValue) {
+  if (!currentUid) return;
+  const order = allOrders.find(o => o.id === orderId);
+  if (!order) return;
+  const oldTime = (String(order.deliveryDate || '').split('T')[1]) || '';
+  const newValue = dateValue ? (oldTime ? `${dateValue}T${oldTime}` : dateValue) : '';
+  try {
+    await updateDoc(doc(tenantCollection(currentUid, "orders"), orderId), { deliveryDate: newValue });
+    order.deliveryDate = newValue;
+    showToast(dateValue ? '✅ Estimated collection date saved' : '✅ Estimated date cleared');
+  } catch (e) {
+    alert('Date save fail hua: ' + e.message);
+    renderTable();
+  }
+};
+
+// ---------- CUSTOMER TRACKING LINK ----------
+async function ensureTrackingUrl(order) {
+  let token = order.trackingToken;
+  if (!token) {
+    const res = await createTrackingLink({ orderId: order.id });
+    token = res.data && res.data.token;
+    if (!token) throw new Error('No token returned');
+    order.trackingToken = token;
+  }
+  return trackingUrl(token);
+}
+
+window.copyTrackingLink = async function (orderId) {
+  const order = allOrders.find(o => o.id === orderId);
+  if (!order) return;
+  try {
+    const url = await ensureTrackingUrl(order);
+    try { await navigator.clipboard.writeText(url); showToast('🔗 Tracking link copied'); }
+    catch (e) { window.prompt('Tracking link (copy karo):', url); }
+  } catch (e) {
+    alert('Tracking link nahi ban paya: ' + (e.message || e));
+  }
+};
+
+window.sendTrackingOnWhatsApp = async function (orderId) {
+  const order = allOrders.find(o => o.id === orderId);
+  if (!order) return;
+  // Open the tab synchronously (popup blockers), then point it at WhatsApp once the link is ready.
+  const win = window.open('', '_blank');
+  try {
+    const url = await ensureTrackingUrl(order);
+    const text = trackingMessage({ customerName: order.customerName, shopName: shopProfile.shopName, orderNo: order.orderNo, url });
+    const wa = whatsappUrl(order.mobile, text);
+    if (win) win.location.href = wa; else window.location.href = wa;
+  } catch (e) {
+    if (win) win.close();
+    alert('Tracking link nahi ban paya: ' + (e.message || e));
   }
 };
 

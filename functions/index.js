@@ -17,6 +17,7 @@ const {
 const admin = require("firebase-admin");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
+const orderTracking = require("./orderTracking");
 
 admin.initializeApp();
 
@@ -812,6 +813,53 @@ exports.razorpayWebhook = onRequest(
     } catch (error) {
       console.error("Razorpay webhook processing failed:", error);
       res.status(500).send("Webhook processing failed");
+    }
+  }
+);
+
+
+// =========================================================
+// CUSTOMER ORDER TRACKING
+// createOrderTrackingLink: signed-in shop owner -> random link token for one of THEIR orders.
+// getOrderTracking: public (no login), token only, returns whitelisted fields.
+// Logic + data model: functions/orderTracking.js
+// =========================================================
+
+exports.createOrderTrackingLink = onCall(
+  { region: "asia-south1" },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "Please sign in.");
+    }
+
+    try {
+      return await orderTracking.createTrackingLink({
+        db,
+        uid: request.auth.uid,
+        orderId: request.data && request.data.orderId,
+        HttpsError,
+      });
+    } catch (error) {
+      if (error instanceof HttpsError) throw error;
+      console.error("createOrderTrackingLink failed:", error);
+      throw new HttpsError("internal", "Could not create a tracking link.");
+    }
+  }
+);
+
+exports.getOrderTracking = onCall(
+  { region: "asia-south1", maxInstances: 5 },
+  async (request) => {
+    try {
+      return await orderTracking.getTracking({
+        db,
+        token: request.data && request.data.token,
+        HttpsError,
+      });
+    } catch (error) {
+      if (error instanceof HttpsError) throw error;
+      console.error("getOrderTracking failed:", error);
+      throw new HttpsError("internal", "Could not load tracking right now.");
     }
   }
 );

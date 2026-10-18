@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Track your order | FRALEN CRM</title>
+<meta name="description" content="Check the status of your optical order without logging in.">
+<!-- Private link: keep it out of search results and never leak the token through the Referer header. -->
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" type="image/png" href="/favicon/favicon-96x96.png" sizes="96x96">
+<link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
+<link rel="shortcut icon" href="/favicon/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">
+<style>
+:root{--navy:#0f1f3d;--navy2:#1b3157;--amber:#f5a623;--ink:#1d2433;--muted:#5b6578;--bg:#f6f7fa;--line:#e1e5ee;--green:#059669;--blue:#1d4ed8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{background:var(--navy);color:#fff;padding:1.25rem 1rem;border-bottom:4px solid var(--amber);text-align:center}
+header .shop{font-size:1.25rem;font-weight:700;letter-spacing:.01em}
+header .sub{color:#c3cde0;font-size:.85rem;margin-top:.15rem}
+main{max-width:520px;margin:0 auto;padding:1.25rem 1rem 2rem}
+.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:1.25rem 1.25rem 1rem;box-shadow:0 8px 24px rgba(15,31,61,.06)}
+.hello{font-size:1.05rem;margin:0 0 .15rem}
+.order{color:var(--muted);font-size:.9rem;margin:0 0 1rem}
+.banner{border-radius:10px;padding:.75rem .9rem;margin:0 0 1.1rem;font-weight:600;font-size:.95rem}
+.banner.ready{background:#dbeafe;color:#1e40af}
+.banner.done{background:#d1fae5;color:#047857}
+.banner.wip{background:#fef3c7;color:#92400e}
+ol.steps{list-style:none;margin:0;padding:0}
+.steps li{position:relative;display:flex;gap:.85rem;padding:0 0 1.15rem 0}
+.steps li:last-child{padding-bottom:.2rem}
+.steps li:not(:last-child)::before{content:"";position:absolute;left:17px;top:36px;bottom:-2px;width:2px;background:var(--line)}
+.steps li.done:not(:last-child)::before{background:var(--green)}
+.dot{flex:none;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.05rem;background:#eef1f6;color:#94a3b8;border:2px solid var(--line)}
+.done .dot{background:var(--green);border-color:var(--green);color:#fff}
+.current .dot{background:#fff;border-color:var(--blue);color:var(--blue);box-shadow:0 0 0 4px rgba(29,78,216,.12)}
+.txt .t{font-weight:600;line-height:1.2;padding-top:.5rem}
+.txt .d{font-size:.8rem;color:var(--muted)}
+.todo .t{color:#94a3b8;font-weight:500}
+.eta{margin-top:.9rem;padding-top:.9rem;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:.75rem;font-size:.92rem}
+.eta b{color:var(--navy)}
+.contact{margin-top:1rem;text-align:center;font-size:.92rem}
+.contact a{display:inline-block;margin-top:.35rem;padding:.55rem 1.1rem;border-radius:999px;background:var(--navy);color:#fff;text-decoration:none;font-weight:600}
+.msg{text-align:center;padding:2rem 1rem;color:var(--muted)}
+.msg h1{font-size:1.15rem;color:var(--ink);margin:.2rem 0 .4rem}
+.foot{text-align:center;color:var(--muted);font-size:.78rem;margin-top:1rem}
+.upd{text-align:center;color:var(--muted);font-size:.75rem;margin-top:.6rem}
+@media (prefers-color-scheme:dark){
+:root{--bg:#0b1220;--ink:#e6ebf5;--muted:#9aa6bd;--line:#26324a}
+.card{background:#121b2e}
+.dot{background:#1a2540}
+.current .dot{background:#121b2e}
+.banner.ready{background:#1e3a8a;color:#dbeafe}.banner.done{background:#064e3b;color:#d1fae5}.banner.wip{background:#78350f;color:#fef3c7}
+.eta b{color:#fff}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="shop" id="shop">FRALEN CRM</div>
+  <div class="sub">Order status</div>
+</header>
+<main>
+  <div class="card" id="card"><div class="msg" id="loading">Loading your order…</div></div>
+  <div class="upd" id="upd" hidden></div>
+  <div class="foot">Powered by FRALEN CRM</div>
+</main>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
+import { STAGES, stageIndex } from "./js/order-stages.js";
+
+// Public web config (same values as firebase-config.js). Not a secret; the data is protected server-side.
+const app = initializeApp({
+  apiKey: "AIzaSyBHSFdvPAI1kz91whHbTj0rgUefVhPthLc",
+  authDomain: "loginpage1-16430.firebaseapp.com",
+  projectId: "loginpage1-16430",
+  appId: "1:438297643443:web:a2a75a2873d2746613e3c6",
+});
+const getOrderTracking = httpsCallable(getFunctions(app, "asia-south1"), "getOrderTracking");
+
+const card = document.getElementById("card");
+const token = new URLSearchParams(location.search).get("t") || "";
+const TOKEN_RE = /^[A-Za-z0-9_-]{22,64}$/;
+const REFRESH_MS = 60000;
+
+// Everything below uses textContent only, so order data can never inject markup.
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+const fmtDate = (iso) => new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+const fmtTime = (iso) => new Date(iso).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+
+function showMessage(title, body) {
+  card.replaceChildren();
+  const box = el("div", "msg");
+  box.append(el("h1", "", title), el("div", "", body));
+  card.append(box);
+}
+
+function render(t) {
+  document.title = (t.shopName ? t.shopName + " | " : "") + "Track your order";
+  if (t.shopName) document.getElementById("shop").textContent = t.shopName;
+
+  const current = stageIndex(t.stage);
+  const delivered = t.stage === "Delivered";
+  card.replaceChildren();
+
+  card.append(el("p", "hello", t.customerFirstName ? `Hello ${t.customerFirstName},` : "Hello,"));
+  card.append(el("p", "order", t.orderNo ? `Order ${t.orderNo}` + (t.orderDate ? ` · placed ${fmtDate(t.orderDate)}` : "") : "Your order"));
+
+  if (delivered) card.append(el("div", "banner done", "✅ Your order has been delivered. Thank you!"));
+  else if (t.stage === "Ready") card.append(el("div", "banner ready", "📦 Your order is ready. Please visit the shop to collect it."));
+  else card.append(el("div", "banner wip", "We are working on your order."));
+
+  const list = el("ol", "steps");
+  STAGES.forEach((s, i) => {
+    const state = i < current || delivered ? "done" : i === current ? "current" : "todo";
+    const li = el("li", state);
+    li.append(el("div", "dot", state === "done" ? "✓" : s.icon));
+    const txt = el("div", "txt");
+    txt.append(el("div", "t", s.label));
+    const when = t.stageTimes && t.stageTimes[s.key];
+    if (when && i <= current) txt.append(el("div", "d", fmtTime(when)));
+    li.append(txt);
+    list.append(li);
+  });
+  card.append(list);
+
+  if (!delivered && t.estimatedCollectionDate) {
+    const eta = el("div", "eta");
+    eta.append(el("span", "", "Estimated collection"), el("b", "", fmtDate(t.estimatedCollectionDate)));
+    card.append(eta);
+  }
+
+  if (t.shopPhone) {
+    const c = el("div", "contact", "Questions about your order?");
+    c.append(document.createElement("br"));
+    const a = el("a", "", "📞 Call " + (t.shopName || "the shop"));
+    a.href = "tel:" + t.shopPhone.replace(/[^\d+]/g, "");
+    c.append(a);
+    card.append(c);
+  }
+
+  const upd = document.getElementById("upd");
+  upd.hidden = false;
+  upd.textContent = "Last updated " + new Date().toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+}
+
+async function load(first) {
+  try {
+    const res = await getOrderTracking({ token });
+    if (res.data && res.data.tracking) render(res.data.tracking);
+    else showMessage("Something went wrong", "Please try again in a moment.");
+  } catch (e) {
+    const notFound = e && (e.code === "functions/not-found" || e.code === "not-found");
+    if (notFound) showMessage("Link not valid", "This tracking link is not valid or is no longer active. Please ask the shop to send it again.");
+    else if (first) showMessage("Could not load your order", "Please check your internet connection and try again.");
+    // on a background refresh failure keep showing the last good state
+  }
+}
+
+if (!TOKEN_RE.test(token)) {
+  showMessage("Link not valid", "This tracking link looks incomplete. Please open the full link the shop sent you.");
+} else {
+  load(true);
+  setInterval(() => { if (!document.hidden) load(false); }, REFRESH_MS);
+}
+</script>
+</body>
+</html>

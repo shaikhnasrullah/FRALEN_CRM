@@ -280,13 +280,16 @@ table.prod-table tr:nth-child(even) td { background: #f8faff; }
     <p style="color:var(--gray);font-size:13px;margin-bottom:20px">Order No. <b id="saved-orderno"></b></p>
     <button class="save-btn" style="margin:0 0 10px" onclick="window.printSavedInvoice()">🖨️ Print Invoice</button>
     <button class="save-btn" id="print-rx-btn" style="margin:0 0 10px;background:#7B93FF;display:none" onclick="window.printSavedPrescription()">👁️ Print Prescription Card</button>
+    <button class="save-btn" id="track-wa-btn" style="margin:0 0 10px;background:#4338CA;display:none" onclick="window.sendSavedTracking()">📍 Send Tracking Link on WhatsApp</button>
     <button class="btn-cancel" style="width:100%;padding:11px" onclick="window.location.href='dashboard.html'">Skip, Go to Dashboard</button>
   </div>
 </div>
 
 <script type="module">
 import { addDoc, getDoc, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import { requireAuth, tenantCollection, profileDoc } from "./firebase-config.js";
+import { trackingUrl, trackingMessage, whatsappUrl } from "./js/order-stages.js";
 import { printInvoice } from "./invoice-print.js";
 import { printPrescription } from "./prescription-print.js";
 
@@ -605,6 +608,8 @@ async function finishSave() {
     // Separate from payment status above — this tracks physical order
     // preparation: Pending -> Ready -> Delivered. Updated from sales-history.html.
     orderStage: 'Pending',
+    // When each stage was reached; shown on the customer tracking page.
+    stageTimes: { Pending: new Date().toISOString() },
     // Every payment (advance now, remaining later from sales-history.html)
     // is logged here with its mode, so Cash vs Online can be reconciled.
     payments: (() => {
@@ -635,8 +640,16 @@ async function finishSave() {
   try {
     // ⬇️ THE key multi-tenant change: write into users/{uid}/orders,
     // never a global "orders" collection.
-    await addDoc(tenantCollection(currentUid, "orders"), order);
+    const savedRef = await addDoc(tenantCollection(currentUid, "orders"), order);
     lastSavedOrder = order;
+    // Best effort: the order is already saved, so a failure here must not block the shop.
+    try {
+      const res = await httpsCallable(getFunctions(undefined, "asia-south1"), "createOrderTrackingLink")({ orderId: savedRef.id });
+      if (res.data && res.data.token) {
+        order.trackingToken = res.data.token;
+        document.getElementById('track-wa-btn').style.display = '';
+      }
+    } catch (e) { console.warn('Tracking link not created:', e); }
     document.getElementById('saved-orderno').textContent = order.orderNo || '';
     document.getElementById('print-rx-btn').style.display = order.hasLens ? '' : 'none';
     document.getElementById('saved-modal').classList.add('open');
@@ -657,6 +670,12 @@ window.toggleCustomerAccount = toggleCustomerAccount;
 window.saveOrder = saveOrder;
 window.closeRx = closeRx;
 window.saveRx = saveRx;
+window.sendSavedTracking = function () {
+  if (!lastSavedOrder || !lastSavedOrder.trackingToken) return;
+  const url = trackingUrl(lastSavedOrder.trackingToken);
+  const text = trackingMessage({ customerName: lastSavedOrder.customerName, shopName: shopProfile.shopName, orderNo: lastSavedOrder.orderNo, url });
+  window.open(whatsappUrl(lastSavedOrder.mobile, text), '_blank');
+};
 window.printSavedInvoice = function () {
   if (!lastSavedOrder) return;
   printInvoice(lastSavedOrder, shopProfile);
